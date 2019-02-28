@@ -22,6 +22,7 @@ import java.nio.ByteBuffer
 import java.nio.channels.ServerSocketChannel
 import java.sql.Timestamp
 import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.TimeUnit._
 
 import scala.collection.JavaConverters._
 
@@ -167,7 +168,7 @@ class TextSocketStreamSuite extends StreamTest with SharedSQLContext with Before
       // Timestamp for rate stream is round to second which leads to milliseconds lost, that will
       // make batch1stamp smaller than current timestamp if both of them are in the same second.
       // Comparing by second to make sure the correct behavior.
-      assert(batch1Stamp.getTime >= curr / 1000 * 1000)
+      assert(batch1Stamp.getTime >= SECONDS.toMillis(MILLISECONDS.toSeconds(curr)))
       assert(!batch2Stamp.before(batch1Stamp))
     }
   }
@@ -294,25 +295,25 @@ class TextSocketStreamSuite extends StreamTest with SharedSQLContext with Before
     serverThread = new ServerThread()
     serverThread.start()
 
-    val readSupport = new TextSocketContinuousReadSupport(
-      new DataSourceOptions(Map("numPartitions" -> "2", "host" -> "localhost",
-        "port" -> serverThread.port.toString).asJava))
-
-    val scanConfig = readSupport.newScanConfigBuilder(readSupport.initialOffset()).build()
-    val tasks = readSupport.planInputPartitions(scanConfig)
-    assert(tasks.size == 2)
+    val stream = new TextSocketContinuousStream(
+      host = "localhost",
+      port = serverThread.port,
+      numPartitions = 2,
+      options = DataSourceOptions.empty())
+    val partitions = stream.planInputPartitions(stream.initialOffset())
+    assert(partitions.length == 2)
 
     val numRecords = 10
     val data = scala.collection.mutable.ListBuffer[Int]()
     val offsets = scala.collection.mutable.ListBuffer[Int]()
-    val readerFactory = readSupport.createContinuousReaderFactory(scanConfig)
+    val readerFactory = stream.createContinuousReaderFactory()
     import org.scalatest.time.SpanSugar._
     failAfter(5 seconds) {
       // inject rows, read and check the data and offsets
       for (i <- 0 until numRecords) {
         serverThread.enqueue(i.toString)
       }
-      tasks.foreach {
+      partitions.foreach {
         case t: TextSocketContinuousInputPartition =>
           val r = readerFactory.createReader(t).asInstanceOf[TextSocketContinuousPartitionReader]
           for (i <- 0 until numRecords / 2) {
@@ -330,15 +331,15 @@ class TextSocketStreamSuite extends StreamTest with SharedSQLContext with Before
           data.clear()
         case _ => throw new IllegalStateException("Unexpected task type")
       }
-      assert(readSupport.startOffset.offsets == List(3, 3))
-      readSupport.commit(TextSocketOffset(List(5, 5)))
-      assert(readSupport.startOffset.offsets == List(5, 5))
+      assert(stream.startOffset.offsets == List(3, 3))
+      stream.commit(TextSocketOffset(List(5, 5)))
+      assert(stream.startOffset.offsets == List(5, 5))
     }
 
     def commitOffset(partition: Int, offset: Int): Unit = {
-      val offsetsToCommit = readSupport.startOffset.offsets.updated(partition, offset)
-      readSupport.commit(TextSocketOffset(offsetsToCommit))
-      assert(readSupport.startOffset.offsets == offsetsToCommit)
+      val offsetsToCommit = stream.startOffset.offsets.updated(partition, offset)
+      stream.commit(TextSocketOffset(offsetsToCommit))
+      assert(stream.startOffset.offsets == offsetsToCommit)
     }
   }
 
@@ -346,13 +347,15 @@ class TextSocketStreamSuite extends StreamTest with SharedSQLContext with Before
     serverThread = new ServerThread()
     serverThread.start()
 
-    val readSupport = new TextSocketContinuousReadSupport(
-      new DataSourceOptions(Map("numPartitions" -> "2", "host" -> "localhost",
-        "port" -> serverThread.port.toString).asJava))
+    val stream = new TextSocketContinuousStream(
+      host = "localhost",
+      port = serverThread.port,
+      numPartitions = 2,
+      options = DataSourceOptions.empty())
 
-    readSupport.startOffset = TextSocketOffset(List(5, 5))
+    stream.startOffset = TextSocketOffset(List(5, 5))
     assertThrows[IllegalStateException] {
-      readSupport.commit(TextSocketOffset(List(6, 6)))
+      stream.commit(TextSocketOffset(List(6, 6)))
     }
   }
 
@@ -360,21 +363,21 @@ class TextSocketStreamSuite extends StreamTest with SharedSQLContext with Before
     serverThread = new ServerThread()
     serverThread.start()
 
-    val readSupport = new TextSocketContinuousReadSupport(
-      new DataSourceOptions(Map("numPartitions" -> "2", "host" -> "localhost",
-        "includeTimestamp" -> "true",
-        "port" -> serverThread.port.toString).asJava))
-    val scanConfig = readSupport.newScanConfigBuilder(readSupport.initialOffset()).build()
-    val tasks = readSupport.planInputPartitions(scanConfig)
-    assert(tasks.size == 2)
+    val stream = new TextSocketContinuousStream(
+      host = "localhost",
+      port = serverThread.port,
+      numPartitions = 2,
+      options = new DataSourceOptions(Map("includeTimestamp" -> "true").asJava))
+    val partitions = stream.planInputPartitions(stream.initialOffset())
+    assert(partitions.size == 2)
 
     val numRecords = 4
     // inject rows, read and check the data and offsets
     for (i <- 0 until numRecords) {
       serverThread.enqueue(i.toString)
     }
-    val readerFactory = readSupport.createContinuousReaderFactory(scanConfig)
-    tasks.foreach {
+    val readerFactory = stream.createContinuousReaderFactory()
+    partitions.foreach {
       case t: TextSocketContinuousInputPartition =>
         val r = readerFactory.createReader(t).asInstanceOf[TextSocketContinuousPartitionReader]
         for (_ <- 0 until numRecords / 2) {
